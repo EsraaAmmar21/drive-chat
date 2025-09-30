@@ -1,0 +1,50 @@
+# # Google Drive integration
+# google-api-python-client
+# google-auth-oauthlib
+# google-auth-httplib2
+
+
+# # LLM + AI frameworks
+# langchain
+# transformers
+# huggingface-hub
+
+# # (Optional) Useful extras
+# python-dotenv
+# tqdm
+
+# for dirve folder [search /download relative files ]
+# pypdf>=4.2.0
+# sentence-transformers>=3.0.1
+# numpy>=1.26.4
+# nltk>=3.9.1
+# faiss-cpu>=1.8.0.post1
+
+# utilities
+# rich>=13.8.1
+# requests>=2.32.3
+
+# parsing
+# llama-parse>=0.4.6
+
+# # embedding + tokenization 
+# transformers>=4.44.0
+# huggingface-hub>=0.24.6
+
+# pymupdf>=1.24.9
+# pillow>=10.4.0
+# pytesseract>=0.3.13
+
+streamlit>=1.36.0
+fastapi>=0.111.0      # (optional, only if you also keep the API)
+uvicorn>=0.30.0       # (optional)
+huggingface_hub>=0.24.0
+sentence-transformers>=2.7.0
+transformers>=4.44.0
+PyMuPDF>=1.24.2
+Pillow>=10.4.0
+google-api-python-client>=2.141.0
+google-auth-oauthlib>=1.2.0
+google-auth>=2.34.0
+python-dotenv>=1.0.1
+requests>=2.32.0
