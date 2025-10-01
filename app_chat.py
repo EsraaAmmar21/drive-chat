@@ -1,182 +1,121 @@
 # app_chat.py
-import os, time
+import os, time, json
 import streamlit as st
-from urllib.parse import urlencode
-
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
 from src.agent.simple_agent import SimpleDriveAgent
-from src.llm.hf_client import LLMClient
+from src.llm.hf_client import LLMClient  # keeps your current LLM client
 
-# --- allow credentials.json to come from a secret (Streamlit/Spaces/Render) ---
-CREDS_JSON_ENV = os.getenv("GOOGLE_CLIENT_SECRETS_JSON")  # full JSON string
-CREDS_PATH = os.getenv("GOOGLE_CLIENT_SECRETS", "credentials.json")
-if CREDS_JSON_ENV and not os.path.exists(CREDS_PATH):
-    with open(CREDS_PATH, "w", encoding="utf-8") as f:
-        f.write(CREDS_JSON_ENV)
+st.set_page_config(page_title="Drive QA", page_icon="📂", layout="wide")
 
+# ---- Config from secrets/env
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
-CLIENT_SECRETS_FILE = os.getenv("GOOGLE_CLIENT_SECRETS", "credentials.json")
-# IMPORTANT: set this to your deployed Streamlit URL in secrets, e.g. https://<you>-<app>.streamlit.app
-REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8501")
+CLIENT_SECRETS_JSON = os.getenv("GOOGLE_CLIENT_SECRETS_JSON", "")
+REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "")
+assert CLIENT_SECRETS_JSON and REDIRECT_URI, "Missing GOOGLE_CLIENT_SECRETS_JSON or GOOGLE_REDIRECT_URI"
 
-SESSION_KEY = "drive_creds"
-TTL_SECONDS = 6 * 60 * 60
+# ---- Session helpers
+def get_creds() -> Credentials | None:
+    c = st.session_state.get("creds_dict")
+    return Credentials.from_authorized_user_info(c, SCOPES) if c else None
 
-st.set_page_config(page_title="Drive Chat", page_icon="📂", layout="centered")
-st.title("📂 Drive Chat (Streamlit)")
-st.caption("Grounded answers from your Google Drive PDFs (read-only).")
-
-# -----------------------
-# Session helpers
-# -----------------------
-def _session_get():
-    sess = st.session_state.get(SESSION_KEY)
-    if not sess:
-        return None
-    if time.time() - sess.get("ts", 0) > TTL_SECONDS:
-        del st.session_state[SESSION_KEY]
-        return None
-    sess["ts"] = int(time.time())
-    return sess
-
-def _session_save(creds_dict: dict):
-    st.session_state[SESSION_KEY] = {"creds": creds_dict, "ts": int(time.time())}
-
-def _require_creds() -> Credentials | None:
-    sess = _session_get()
-    if not sess:
-        return None
-    cdict = sess["creds"]
-    creds = Credentials.from_authorized_user_info(cdict, SCOPES)
-    if not creds.valid and creds.expired and creds.refresh_token:
-        from google.auth.transport.requests import Request as GRequest
-        creds.refresh(GRequest())
-        _session_save({
-            "token": creds.token,
-            "refresh_token": creds.refresh_token,
-            "token_uri": creds.token_uri,
-            "client_id": creds.client_id,
-            "client_secret": creds.client_secret,
-            "scopes": creds.scopes,
-        })
-    return creds
-
-# -----------------------
-# OAuth callback handling (?code=...)
-# -----------------------
-params = st.query_params
-code = params.get("code")
-if code and not _session_get():
-    flow = Flow.from_client_secrets_file(
-        CLIENT_SECRETS_FILE, scopes=SCOPES, redirect_uri=REDIRECT_URI
-    )
-    # Compose the full redirect-back URL with the code and pass to fetch_token
-    redirect_back = f"{REDIRECT_URI}?{urlencode({'code': code})}"
-    flow.fetch_token(authorization_response=redirect_back)
-    creds = flow.credentials
-    _session_save({
+def set_creds(creds: Credentials):
+    st.session_state["creds_dict"] = {
         "token": creds.token,
         "refresh_token": creds.refresh_token,
         "token_uri": creds.token_uri,
         "client_id": creds.client_id,
         "client_secret": creds.client_secret,
         "scopes": creds.scopes,
-    })
-    # Clean the URL to remove ?code=...
-    st.query_params.clear()
-    st.rerun()
+    }
 
-creds = _require_creds()
+def drive_service(creds: Credentials):
+    return build("drive", "v3", credentials=creds)
+
+# ---- Build OAuth URL
+def get_auth_url():
+    flow = Flow.from_client_config(json.loads(CLIENT_SECRETS_JSON), scopes=SCOPES, redirect_uri=REDIRECT_URI)
+    auth_url, _state = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="consent",
+    )
+    st.session_state["oauth_state"] = _state
+    return auth_url
+
+# ---- Process callback ?code=...
+def maybe_finish_oauth():
+    params = st.query_params  # Streamlit >=1.31
+    code = params.get("code", [None])[0] if isinstance(params.get("code"), list) else params.get("code")
+    state = params.get("state", [None])[0] if isinstance(params.get("state"), list) else params.get("state")
+    if not code:
+        return
+    # finalize
+    flow = Flow.from_client_config(json.loads(CLIENT_SECRETS_JSON), scopes=SCOPES, redirect_uri=REDIRECT_URI)
+    flow.fetch_token(authorization_response=st.experimental_get_query_params().get("code") and st.experimental_get_query_params())  # backward compat, ignored if None
+    # The safer way:
+    flow.fetch_token(code=code)
+    set_creds(flow.credentials)
+    # Clear code from URL
+    st.query_params.clear()
+
+# ---- UI
+st.title("📂 Drive Chat (grounded)")
 
 with st.sidebar:
-    st.header("Settings")
-    max_files_download = st.number_input("Max files to download", 1, 10, 3)
-    top_k_chunks = st.number_input("Top chunks for LLM", 1, 20, 8)
-    show_debug = st.checkbox("Show debug tables", True)
+    st.header("Auth")
     if st.button("Sign out", use_container_width=True):
-        if SESSION_KEY in st.session_state:
-            del st.session_state[SESSION_KEY]
+        for k in ("creds_dict", "oauth_state"): st.session_state.pop(k, None)
         st.rerun()
 
-if creds is None:
-    st.info("Sign in with Google Drive to start.")
-    if st.button("🔐 Sign in with Google Drive", type="primary"):
-        flow = Flow.from_client_secrets_file(
-            CLIENT_SECRETS_FILE, scopes=SCOPES, redirect_uri=REDIRECT_URI
-        )
-        auth_url, _ = flow.authorization_url(
-            access_type="offline",
-            include_granted_scopes="true",
-            prompt="consent",
-        )
-        st.link_button("Open Google consent", auth_url, use_container_width=True)
+    with st.expander("Settings", expanded=False):
+        max_files_download = st.number_input("Max files to download", 1, 10, 3, key="mx")
+        top_k_chunks = st.number_input("Top chunks to feed LLM", 1, 20, 8, key="tk")
+        show_debug = st.checkbox("Show debug tables", value=True, key="dbg")
+
+# Try to finish OAuth if we have ?code= in the URL
+maybe_finish_oauth()
+
+creds = get_creds()
+if not creds:
+    st.info("Sign in to your Google Drive to begin.")
+    if st.button("🔐 Sign in with Google", type="primary"):
+        st.stop()  # ensures the next rerun opens the URL immediately
+    # Print link for the user to click
+    st.markdown(f"[Continue → Google]({get_auth_url()})")
     st.stop()
 
-st.success("Signed in ✔️")
+# Build Drive service and agent
+svc = drive_service(creds)
+agent = SimpleDriveAgent(svc, max_files_download=st.session_state.get("mx", 3), top_k_chunks=st.session_state.get("tk", 8), llm=LLMClient())
 
-# --- Chat history ---
+# Chat state
 if "history" not in st.session_state:
     st.session_state.history = []
 
+prompt = st.chat_input("Ask about your Drive… e.g., 'summary Esraa resume'")
 for turn in st.session_state.history:
     with st.chat_message(turn["role"]):
         st.markdown(turn["content"])
         if turn.get("sources"):
-            with st.expander("Sources", expanded=False):
-                for s in turn["sources"]:
-                    st.write(f"- {s}")
+            with st.expander("Sources"):
+                for s in turn["sources"]: st.write(f"- {s}")
 
-prompt = st.chat_input("Ask (e.g., 'start chating with your pdf')")
 if prompt:
     st.session_state.history.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
+    with st.chat_message("user"): st.markdown(prompt)
     with st.chat_message("assistant"):
         with st.spinner("Searching Drive → parsing → retrieving → asking LLM…"):
-            svc = build("drive", "v3", credentials=creds)
-            agent = SimpleDriveAgent(
-                svc,
-                max_files_download=int(max_files_download),
-                top_k_chunks=int(top_k_chunks),
-                llm=LLMClient(),
-            )
+            t0 = time.time()
             sidebar, downloaded, top_chunks = agent.retrieve(prompt)
             answer, sources = agent.answer_from_chunks(prompt, top_chunks)
-
+            dt = time.time() - t0
         st.markdown(answer or "_(no answer)_")
         if sources:
             with st.expander("Sources", expanded=True):
-                for s in sources:
-                    st.write(f"- {s}")
-
+                for s in sources: st.write(f"- {s}")
         if show_debug:
-            col1, col2 = st.columns(2)
-            with col1:
-                st.subheader("Top filename matches")
-                if sidebar:
-                    st.dataframe([{
-                        "score": round(x.get("title_score", 0), 3),
-                        "file": x.get("name", ""),
-                        "modified": x.get("modifiedTime", "-"),
-                        "size": x.get("size", "-"),
-                        "link": x.get("url", "-"),
-                    } for x in sidebar[:10]], use_container_width=True)
-                else:
-                    st.write("_No PDFs found in Drive._")
-            with col2:
-                st.subheader("Retrieved chunks")
-                if top_chunks:
-                    st.dataframe([{
-                        "sim": round(c.get("score", 0), 3),
-                        "file": c.get("file_name", ""),
-                        "chunk#": c.get("chunk_index", 0),
-                        "preview": (c.get("text", "")[:160] + "…") if c.get("text") else "",
-                    } for c in top_chunks], use_container_width=True)
-                else:
-                    st.write("_No relevant chunks passed threshold._")
-
-        st.session_state.history.append({"role": "assistant", "content": answer, "sources": sources})
+            st.caption(f"⚙️ {dt:.1f}s | files scanned: {len(sidebar)} | chunks used: {len(top_chunks)}")
+    st.session_state.history.append({"role": "assistant", "content": answer, "sources": sources})
