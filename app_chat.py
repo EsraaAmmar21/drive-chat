@@ -95,7 +95,7 @@ agent = SimpleDriveAgent(svc, max_files_download=st.session_state.get("mx", 3), 
 if "history" not in st.session_state:
     st.session_state.history = []
 
-prompt = st.chat_input("Ask about your Drive… e.g., 'summary Esraa resume'")
+prompt = st.chat_input("Ask about your Drive… e.g., 'start chating with your pdfs'")
 for turn in st.session_state.history:
     with st.chat_message(turn["role"]):
         st.markdown(turn["content"])
