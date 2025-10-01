@@ -127,14 +127,63 @@ with st.sidebar:
         st.checkbox("Show debug tables", value=True, key="dbg")
 
 # Try to finish OAuth if we have ?code= in the URL
-maybe_finish_oauth()
+def maybe_finish_oauth() -> None:
+    """
+    If the URL contains ?code=..., complete the OAuth code exchange
+    and store credentials in the session, then clear query params.
+    """
+    params = st.query_params
+    code = params.get("code")
+    if isinstance(code, list):
+        code = code[0]
 
-creds = get_creds()
-if not creds:
-    st.info("Sign in to your Google Drive to begin.")
-    auth_url = get_auth_url()
-    st.markdown(f"[🔐 Sign in with Google]({auth_url})")
-    st.stop()
+    state = params.get("state")
+    if isinstance(state, list):
+        state = state[0]
+
+    if not code:
+        return
+
+    # Optional: verify state (if both present)
+    if "oauth_state" in st.session_state and state and state != st.session_state["oauth_state"]:
+        st.warning("OAuth state mismatch; ignoring response.")
+        return
+
+    flow = _flow()
+    
+    # Fetch token with authorization_response or disable scope validation
+    try:
+        # Method 1: Use the full authorization response URL
+        from urllib.parse import urlencode, urlparse, parse_qs
+        
+        # Reconstruct the full callback URL
+        current_url = REDIRECT_URI
+        query_string = urlencode(dict(params))
+        authorization_response = f"{current_url}?{query_string}"
+        
+        flow.fetch_token(authorization_response=authorization_response)
+    except Exception as e:
+        # Fallback: Fetch with code only, ignoring scope mismatch
+        try:
+            # This bypasses strict scope validation
+            flow.oauth2session.fetch_token(
+                flow.client_config["token_uri"],
+                code=code,
+                client_secret=flow.client_config["client_secret"],
+                include_client_id=True
+            )
+        except Exception as inner_e:
+            st.error(f"OAuth failed: {str(inner_e)}")
+            return
+    
+    set_creds(flow.credentials)
+
+    # Clear the URL params to avoid re-triggering
+    try:
+        st.query_params.clear()
+    except Exception:
+        pass
+    
 
 # Build Drive service and agent
 svc = drive_service(creds)
